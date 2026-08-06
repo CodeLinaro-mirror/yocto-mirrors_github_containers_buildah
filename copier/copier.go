@@ -52,6 +52,12 @@ func init() {
 // replaced with all of the subdirectories under that point, and the results
 // will be concatenated.
 // The matched paths are returned in lexical order, which makes the output deterministic.
+//
+// WARNING:FIXME: This function has no concept of req.Root. When used within one,
+// if the pattern contains escaping symbolic links, extendedGlob may follow them,
+// read contents of those symbolic links (and possibly other symbolic links outside
+// of the intended root, risking revealing their contents),
+// and may return paths that evaluate to files outside of the intended root.
 func extendedGlob(pattern string) (matches []string, err error) {
 	subdirs := func(dir string) []string {
 		var subdirectories []string
@@ -1245,6 +1251,9 @@ func containsWildcards(path string) bool {
 }
 
 func copierHandlerStat(req request, pm *fileutils.PatternMatcher, idMappings *idtools.IDMappings) *response {
+	// FIXME: (At least because of extendedGlob and insecureResolvePath), this does not fully constrain the operation to req.Root.
+	// Currently known users either use chroot confinement, or only use this to access the users’ own files
+	// where a concept of req.Root is not clearly relevant.
 	errorResponse := func(fmtspec string, args ...any) *response {
 		return &response{Error: fmt.Sprintf(fmtspec, args...), Stat: statResponse{}}
 	}
@@ -1427,6 +1436,9 @@ func checkLinks(item string, req request, info os.FileInfo) (string, os.FileInfo
 }
 
 func copierHandlerGet(bulkWriter io.Writer, req request, pm *fileutils.PatternMatcher, idMappings *idtools.IDMappings) (*response, func() error, error) {
+	// FIXME: (At least because of extendedGlob and insecureResolvePath), this does not fully constrain the operation to req.Root.
+	// Currently known users either use chroot confinement, or only use this to access the users’ own files
+	// where a concept of req.Root is not clearly relevant.
 	statResponse := copierHandlerStat(req, pm, idMappings)
 	errorResponse := func(fmtspec string, args ...any) (*response, func() error, error) {
 		return &response{Error: fmt.Sprintf(fmtspec, args...), Stat: statResponse.Stat, Get: getResponse{}}, nil, nil
@@ -2562,6 +2574,9 @@ func copierHandlerRemove(req request) *response {
 	targets := []string{req.Directory}
 	if req.RemoveOptions.AllowWildcard {
 		var err error
+		// FIXME: This might access files outside of req.Root (which is not even an input).
+		// Currently the only caller seems to be confined by chroot (and the AllowWildcard flag has no known users),
+		// so this is not an immediate risk.
 		targets, err = extendedGlob(req.Directory)
 		if err != nil {
 			return errorResponse("copier: remove: glob %q: %v", req.Directory, err)
