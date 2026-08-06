@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2371,12 +2372,14 @@ func testEnsure(t *testing.T) {
 	ugReadable := os.FileMode(0o750)
 
 	testCases := []struct {
-		description   string
-		subdir        string
-		mkdirs        []string
-		options       EnsureOptions
-		expectCreated []string
-		expectNoted   []EnsureParentPath
+		description           string
+		subdir                string
+		mkdirs                []string
+		symlinks              map[string]string
+		options               EnsureOptions
+		expectCreated         []string
+		expectNoted           []EnsureParentPath
+		expectPhysicallyExist []string // paths don't contain symlinks
 	}{
 		{
 			description: "base",
@@ -2488,6 +2491,66 @@ func testEnsure(t *testing.T) {
 				},
 			},
 		},
+		{
+			description: "symlink-in-parent",
+			mkdirs:      []string{"a"},
+			symlinks:    map[string]string{"a/symlink": "../../../../target"},
+			options: EnsureOptions{
+				Paths: []EnsurePath{
+					{
+						Path:     "/a/symlink/b/c",
+						Typeflag: tar.TypeReg,
+					},
+				},
+			},
+			expectCreated: []string{
+				"target",
+				"target/b",
+				"target/b/c",
+			},
+			expectNoted: []EnsureParentPath{},
+			expectPhysicallyExist: []string{
+				"target",
+				"target/b",
+				"target/b/c",
+			},
+		},
+		{
+			description: "symlink-target-regular",
+			mkdirs:      []string{"a"},
+			symlinks:    map[string]string{"a/symlink": "../../../../target"},
+			options: EnsureOptions{
+				Paths: []EnsurePath{
+					{
+						Path:     "/a/symlink",
+						Typeflag: tar.TypeReg,
+						ModTime:  &zero,
+					},
+				},
+			},
+			expectCreated: []string{"target"},
+			expectNoted:   []EnsureParentPath{},
+			expectPhysicallyExist: []string{
+				"target",
+			},
+		},
+		{
+			description: "symlink-target-dir",
+			mkdirs:      []string{"a"},
+			symlinks:    map[string]string{"a/symlink": "../../../../target"},
+			options: EnsureOptions{
+				Paths: []EnsurePath{
+					{
+						Path:     "/a/symlink",
+						Typeflag: tar.TypeDir,
+						ModTime:  &zero,
+					},
+				},
+			},
+			expectCreated:         []string{"target"},
+			expectNoted:           []EnsureParentPath{},
+			expectPhysicallyExist: []string{"target"},
+		},
 	}
 	for i := range testCases {
 		t.Run(testCases[i].description, func(t *testing.T) {
@@ -2500,6 +2563,9 @@ func testEnsure(t *testing.T) {
 					ChownNew:   &idtools.IDPair{UID: 1, GID: 1},
 				})
 				require.NoError(t, err, "unexpected error ensuring")
+			}
+			for linkPath, linkContents := range testCases[i].symlinks {
+				require.NoError(t, os.Symlink(linkContents, filepath.Join(tmpdir, testCases[i].subdir, linkPath)))
 			}
 			created, noted, err := Ensure(tmpdir, testCases[i].subdir, testCases[i].options)
 			require.NoError(t, err, "unexpected error ensuring")
@@ -2518,8 +2584,9 @@ func testEnsure(t *testing.T) {
 				}
 			}
 			for _, item := range testCases[i].options.Paths {
-				target := filepath.Join(tmpdir, testCases[i].subdir, item.Path)
-				st, err := os.Stat(target)
+				target, err := securejoin.SecureJoin(tmpdir, filepath.Join(testCases[i].subdir, item.Path))
+				require.NoError(t, err)
+				st, err := os.Lstat(target)
 				require.NoError(t, err, "we supposedly created %q", item.Path)
 				if item.Chmod != nil {
 					assert.Equalf(t, *item.Chmod, st.Mode().Perm(), "permissions look wrong on %q", item.Path)
@@ -2533,8 +2600,15 @@ func testEnsure(t *testing.T) {
 				if item.ModTime != nil {
 					assert.Equalf(t, item.ModTime.Unix(), st.ModTime().Unix(), "datestamp looks wrong on %q", item.Path)
 				} else {
-					assert.True(t, !testStarted.After(st.ModTime()), "datestamp is too old on %q: %v < %v", st.ModTime(), testStarted)
+					assert.True(t, !testStarted.After(st.ModTime()), "datestamp is too old on %q: %v < %v", item.Path, st.ModTime(), testStarted)
 				}
+			}
+			for _, item := range testCases[i].expectPhysicallyExist {
+				resolved, err := securejoin.SecureJoin(tmpdir, item)
+				require.NoError(t, err)
+				assert.Equal(t, filepath.Join(tmpdir, item), resolved) // no symlinks within resolved
+				_, err = os.Lstat(resolved)
+				require.NoError(t, err, "we supposedly created %q", item)
 			}
 		})
 	}
