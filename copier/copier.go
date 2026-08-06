@@ -1935,13 +1935,13 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 		}()
 		ignoredItems := make(map[string]struct{})
 		tr := tar.NewReader(bulkReader)
-		hdr, err := tr.Next()
-		for err == nil {
+		hdr, hdrErr := tr.Next()
+		for hdrErr == nil {
 			nameBeforeRenaming := hdr.Name
 			if len(hdr.Name) == 0 {
 				// no name -> ignore the entry
 				ignoredItems[nameBeforeRenaming] = struct{}{}
-				hdr, err = tr.Next()
+				hdr, hdrErr = tr.Next()
 				continue
 			}
 			if req.PutOptions.Rename != nil {
@@ -2188,10 +2188,10 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 				return fmt.Errorf("copier: put: error setting fflags on %q: %w", path, err)
 			}
 		nextHeader:
-			hdr, err = tr.Next()
+			hdr, hdrErr = tr.Next()
 		}
-		if err != io.EOF {
-			return fmt.Errorf("reading tar stream: expected EOF: %w", err)
+		if hdrErr != io.EOF {
+			return fmt.Errorf("reading tar stream: expected EOF: %w", hdrErr)
 		}
 		return nil
 	}
