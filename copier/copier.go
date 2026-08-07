@@ -547,6 +547,9 @@ func Remove(root string, item string, options RemoveOptions) error {
 // cleanerReldirectory resolves relative path candidate lexically, attempting
 // to ensure that when joined as a subdirectory of another directory, it does
 // not reference anything outside of that other directory.
+//
+// WARNING: This does not ensure that using the path is confined to that
+// other directory, the returned path may indirect through escaping symlinks.
 func cleanerReldirectory(candidate string) string {
 	cleaned := strings.TrimPrefix(filepath.Clean(string(os.PathSeparator)+candidate), string(os.PathSeparator))
 	if cleaned == "" {
@@ -558,6 +561,9 @@ func cleanerReldirectory(candidate string) string {
 // convertToRelSubdirectory returns the path of directory, bound and relative to
 // root, as a relative path, or an error if that path can't be computed or if
 // the two directories are on different volumes
+//
+// WARNING: This does not ensure that using the path is confined to root,
+// the returned path may indirect through escaping symlinks.
 func convertToRelSubdirectory(root, directory string) (relative string, err error) {
 	if root == "" || !filepath.IsAbs(root) {
 		return "", fmt.Errorf("expected root directory to be an absolute path, got %q", root)
@@ -1037,7 +1043,7 @@ func pathIsExcluded(root, path string, pm *fileutils.PatternMatcher) (string, bo
 func resolvePath(root, path string, evaluateFinalComponent bool, pm *fileutils.PatternMatcher) (string, error) {
 	rel, err := convertToRelSubdirectory(root, path)
 	if err != nil {
-		return "", fmt.Errorf("making path %q relative to %q", path, root)
+		return "", fmt.Errorf("making path %q relative to %q: %w", path, root, err)
 	}
 	workingPath := root
 	followed := 0
@@ -1083,6 +1089,8 @@ func resolvePath(root, path string, evaluateFinalComponent bool, pm *fileutils.P
 		}
 		// append the current component's name to get the next location
 		workingPath = filepath.Join(workingPath, components[0])
+		// It is important that both values come from filepath.Join(), implying filepath.Clean(): otherwise a non-canonical root input
+		// (e.g, "/dir/" or "/dir/.") would not match.
 		if workingPath == filepath.Join(root, "..") {
 			// attempted to go above the root using a relative path .., scope it
 			workingPath = root
@@ -1813,7 +1821,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 		}
 	}
 	directoryModes := make(map[string]os.FileMode)
-	ensureDirectoryUnderRoot := func(directory string) error {
+	ensureDirectoryUnderRoot := func(directory string) error { // The caller must ensure that the directory parameter does not contain escaping symlinks
 		rel, err := convertToRelSubdirectory(req.Root, directory)
 		if err != nil {
 			return fmt.Errorf("%q is not a subdirectory of %q: %w", directory, req.Root, err)
@@ -1841,7 +1849,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 		}
 		return nil
 	}
-	makeDirectoryWriteable := func(directory string) error {
+	makeDirectoryWriteable := func(directory string) error { // The caller must ensure that the directory parameter does not contain escaping symlinks
 		if _, ok := directoryModes[directory]; !ok {
 			st, err := os.Lstat(directory)
 			if err != nil {
@@ -1855,7 +1863,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 		}
 		return nil
 	}
-	createFile := func(path string, tr *tar.Reader) (int64, error) {
+	createFile := func(path string, tr *tar.Reader) (int64, error) { // Warning: path can refer to an existing (and escaping) symlink (but parents in the path within req.Root are not symlinks)
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, 0o600)
 		if err != nil && errors.Is(err, os.ErrExist) {
 			if req.PutOptions.NoOverwriteDirNonDir {
@@ -1865,7 +1873,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 			}
 			if err = os.RemoveAll(path); err != nil {
 				if os.IsPermission(err) {
-					if err := makeDirectoryWriteable(filepath.Dir(path)); err != nil {
+					if err := makeDirectoryWriteable(filepath.Dir(path)); err != nil { // We prohibit creating regular files at req.Root, which implies filepath.Dir(path) is still within req.Root.
 						return 0, err
 					}
 					err = os.RemoveAll(path)
@@ -1877,7 +1885,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 			f, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, 0o600)
 		}
 		if err != nil && os.IsPermission(err) {
-			if err = makeDirectoryWriteable(filepath.Dir(path)); err != nil {
+			if err = makeDirectoryWriteable(filepath.Dir(path)); err != nil { // We prohibit creating regular files at req.Root, which implies filepath.Dir(path) is still within req.Root.
 				return 0, err
 			}
 			f, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, 0o600)
@@ -1898,14 +1906,14 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 	}
 	info, err := os.Lstat(targetDirectory)
 	if err == nil {
-		if !info.IsDir() {
+		if !info.IsDir() { // This check also implies that req.Root is a directory (or a symlink to one, but the difference is not our concern)
 			return errorResponse("copier: put: %s (%s): exists but is not a directory", req.Directory, targetDirectory)
 		}
 	} else {
 		if !errors.Is(err, os.ErrNotExist) {
 			return errorResponse("copier: put: %s: %v", req.Directory, err)
 		}
-		if err := ensureDirectoryUnderRoot(req.Directory); err != nil {
+		if err := ensureDirectoryUnderRoot(targetDirectory); err != nil {
 			return errorResponse("copier: put: %v", err)
 		}
 	}
@@ -1913,25 +1921,57 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 	if err != nil {
 		return errorResponse("copier: put: %v", err)
 	}
-	cb := func() error {
+	cb := func() (retErr error) {
+		defer osRoot.Close()
 		type directoryAndTimes struct {
 			directory    string
 			atime, mtime time.Time
 		}
 		var directoriesAndTimes []directoryAndTimes
-		defer func() {
+		updateDirectories := func() error {
+			// We did create directories at these paths, but later entries in the tar archive
+			// could have replaced the path or any of its parents with a different file / file kind.
+			// So we don’t actually know that the path refers to a directory; in particular it might
+			// be a (possibly escaping) symlink.
 			for i := range directoriesAndTimes {
 				directoryAndTimes := directoriesAndTimes[len(directoriesAndTimes)-i-1]
-				if err := lutimes(false, directoryAndTimes.directory, directoryAndTimes.atime, directoryAndTimes.mtime); err != nil {
+				path, err := resolvePath(req.Root, directoryAndTimes.directory, false, nil)
+				if err != nil {
+					return fmt.Errorf("error resolving %q/%q: %v", req.Root, directoryAndTimes.directory, err)
+				}
+				fi, err := os.Lstat(path)
+				if err != nil {
+					return err
+				}
+				if !fi.IsDir() {
+					continue // The directory was replaced; whatever happened here, timestamps is no longer relevant.
+				}
+				if err := lutimes(false, path, directoryAndTimes.atime, directoryAndTimes.mtime); err != nil {
 					logrus.Debugf("error setting access and modify timestamps on %q to %s and %s: %v", directoryAndTimes.directory, directoryAndTimes.atime, directoryAndTimes.mtime, err)
 				}
 			}
 			for directory, mode := range directoryModes {
-				if err := os.Chmod(directory, mode); err != nil {
+				path, err := resolvePath(req.Root, directory, false, nil)
+				if err != nil {
+					return fmt.Errorf("error resolving %q/%q: %v", req.Root, directory, err)
+				}
+				fi, err := os.Lstat(path)
+				if err != nil {
+					return err
+				}
+				if !fi.IsDir() {
+					continue // The directory was replaced; whatever happened here, mode is no longer relevant.
+				}
+				if err := os.Chmod(path, mode); err != nil {
 					logrus.Debugf("error setting permissions of %q to 0%o: %v", directory, uint32(mode), err)
 				}
 			}
-			osRoot.Close()
+			return nil
+		}
+		defer func() {
+			if err := updateDirectories(); err != nil && retErr == nil {
+				retErr = err
+			}
 		}()
 		ignoredItems := make(map[string]struct{})
 		tr := tar.NewReader(bulkReader)
@@ -1974,9 +2014,28 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 			}
 			// make sure the parent directory exists, including for tar.TypeXGlobalHeader entries
 			// that we otherwise ignore, because that's what docker build does with them
-			path := filepath.Join(targetDirectory, cleanerHdrName)
-			if err := ensureDirectoryUnderRoot(filepath.Dir(path)); err != nil {
-				return err
+			path, err := resolvePath(req.Root, filepath.Join(req.Directory, cleanerHdrName), false, nil) // Warning: this can refer to an existing (and escaping) symlink
+			if err != nil {
+				return fmt.Errorf("copier: put: error resolving %q/%q: %v", req.Directory, hdr.Name, err)
+			}
+			// We know req.Directory evaluates to a directory if it exists, therefore req.Root can not be a non-directory.
+			if path == filepath.Clean(req.Root) { // resolvePath, via filepath.Join, implicitly Clean()s path, but that’s not the case for req.Root.
+				// The caller has probably pre-created req.Root as a directory; we don’t know for sure, and it doesn’t really matter
+				// because resolvePath works fine enough for non-existent paths, and because the ensureDirectoryUnderRoot
+				// code path below would create dest if necessary.
+				//
+				// The one thing we MUST NOT allow is creating req.Root as a symbolic link, because resolvePath’s operation implicitly
+				// resolves that symlink before constraining the returned path.  We also must not allow replacing an existing directory
+				// with a symbolic link.
+				//
+				// Just refuse all non-directory paths here.
+				if hdr.Typeflag != tar.TypeDir {
+					return fmt.Errorf("refusing to act on a non-directory entry as the extraction root")
+				}
+			} else {
+				if err := ensureDirectoryUnderRoot(filepath.Dir(path)); err != nil {
+					return err
+				}
 			}
 			// figure out what the permissions should be
 			if req.PutOptions.StripSetuidBit && hdr.Mode&cISUID == cISUID {
