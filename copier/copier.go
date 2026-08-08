@@ -1040,7 +1040,21 @@ func pathIsExcluded(root, path string, pm *fileutils.PatternMatcher) (string, bo
 // it is not expected to be.
 // This helps us approximate chrooted behavior on systems and in test cases
 // where chroot isn't available.
-func resolvePath(root, path string, evaluateFinalComponent bool, pm *fileutils.PatternMatcher) (string, error) {
+func resolvePath(root, path string, evaluateFinalComponent bool) (string, error) {
+	return insecureResolvePath(root, path, evaluateFinalComponent, nil) // With pm == nil, the call is not insecure for that reason.
+}
+
+// insecureResolvePath resolves symbolic links in paths, treating the specified
+// directory as the root.
+//
+// WARNING: If pm is set and excludes a symlink, the returned path may be escaping root.
+//
+// Resolving the path this way, and using the result, is in no way secure
+// against another process manipulating the content that we're looking at, and
+// it is not expected to be.
+// This helps us approximate chrooted behavior on systems and in test cases
+// where chroot isn't available.
+func insecureResolvePath(root, path string, evaluateFinalComponent bool, pm *fileutils.PatternMatcher) (string, error) {
 	rel, err := convertToRelSubdirectory(root, path)
 	if err != nil {
 		return "", fmt.Errorf("making path %q relative to %q: %w", path, root, err)
@@ -1105,7 +1119,7 @@ func copierHandlerEval(req request) *response {
 	errorResponse := func(fmtspec string, args ...any) *response {
 		return &response{Error: fmt.Sprintf(fmtspec, args...), Eval: evalResponse{}}
 	}
-	resolvedTarget, err := resolvePath(req.Root, req.Directory, true, nil)
+	resolvedTarget, err := resolvePath(req.Root, req.Directory, true)
 	if err != nil {
 		return errorResponse("copier: eval: error resolving %q: %v", req.Directory, err)
 	}
@@ -1197,7 +1211,7 @@ func copierHandlerStat(req request, pm *fileutils.PatternMatcher, idMappings *id
 				// could be a relative link) and in the context
 				// of the chroot
 				result.ImmediateTarget = immediateTarget
-				resolvedTarget, err := resolvePath(req.Root, globbed, true, pm)
+				resolvedTarget, err := insecureResolvePath(req.Root, globbed, true, pm)
 				if err != nil {
 					return errorResponse("copier: stat: error resolving %q: %v", globbed, err)
 				}
@@ -1900,7 +1914,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 		}
 		return n, nil
 	}
-	targetDirectory, err := resolvePath(req.Root, req.Directory, true, nil)
+	targetDirectory, err := resolvePath(req.Root, req.Directory, true)
 	if err != nil {
 		return errorResponse("copier: put: error resolving %q: %v", req.Directory, err)
 	}
@@ -1935,7 +1949,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 			// be a (possibly escaping) symlink.
 			for i := range directoriesAndTimes {
 				directoryAndTimes := directoriesAndTimes[len(directoriesAndTimes)-i-1]
-				path, err := resolvePath(req.Root, directoryAndTimes.directory, false, nil)
+				path, err := resolvePath(req.Root, directoryAndTimes.directory, false)
 				if err != nil {
 					return fmt.Errorf("error resolving %q/%q: %v", req.Root, directoryAndTimes.directory, err)
 				}
@@ -1951,7 +1965,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 				}
 			}
 			for directory, mode := range directoryModes {
-				path, err := resolvePath(req.Root, directory, false, nil)
+				path, err := resolvePath(req.Root, directory, false)
 				if err != nil {
 					return fmt.Errorf("error resolving %q/%q: %v", req.Root, directory, err)
 				}
@@ -2014,7 +2028,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 			}
 			// make sure the parent directory exists, including for tar.TypeXGlobalHeader entries
 			// that we otherwise ignore, because that's what docker build does with them
-			path, err := resolvePath(req.Root, filepath.Join(req.Directory, cleanerHdrName), false, nil) // Warning: this can refer to an existing (and escaping) symlink
+			path, err := resolvePath(req.Root, filepath.Join(req.Directory, cleanerHdrName), false) // Warning: this can refer to an existing (and escaping) symlink
 			if err != nil {
 				return fmt.Errorf("copier: put: error resolving %q/%q: %v", req.Directory, hdr.Name, err)
 			}
@@ -2082,7 +2096,7 @@ func copierHandlerPut(bulkReader io.Reader, req request, idMappings *idtools.IDM
 				if req.PutOptions.Rename != nil {
 					hdr.Linkname = handleRename(req.PutOptions.Rename, hdr.Linkname)
 				}
-				if linkTarget, err = resolvePath(targetDirectory, filepath.Join(req.Root, filepath.FromSlash(hdr.Linkname)), true, nil); err != nil {
+				if linkTarget, err = resolvePath(targetDirectory, filepath.Join(req.Root, filepath.FromSlash(hdr.Linkname)), true); err != nil {
 					return fmt.Errorf("resolving hardlink target path %q under root %q", hdr.Linkname, req.Root)
 				}
 				if err = os.Link(linkTarget, path); err != nil && errors.Is(err, os.ErrExist) {
@@ -2278,7 +2292,7 @@ func copierHandlerMkdir(req request, idMappings *idtools.IDMappings) (*response,
 		dirUID, dirGID = hostDirPair.UID, hostDirPair.GID
 	}
 
-	directory, err := resolvePath(req.Root, req.Directory, true, nil)
+	directory, err := resolvePath(req.Root, req.Directory, true)
 	if err != nil {
 		return errorResponse("copier: mkdir: error resolving %q: %v", req.Directory, err)
 	}
@@ -2328,7 +2342,7 @@ func copierHandlerRemove(req request) *response {
 	errorResponse := func(fmtspec string, args ...any) *response {
 		return &response{Error: fmt.Sprintf(fmtspec, args...), Remove: removeResponse{}}
 	}
-	resolvedTarget, err := resolvePath(req.Root, req.Directory, false, nil)
+	resolvedTarget, err := resolvePath(req.Root, req.Directory, false)
 	if err != nil {
 		return errorResponse("copier: remove: %v", err)
 	}
@@ -2423,7 +2437,7 @@ func copierHandlerEnsure(req request, idMappings *idtools.IDMappings) *response 
 			uid, gid = hostDirPair.UID, hostDirPair.GID
 		}
 
-		itemPath, err := resolvePath(req.Root, filepath.Join(req.Directory, item.Path), true, nil)
+		itemPath, err := resolvePath(req.Root, filepath.Join(req.Directory, item.Path), true)
 		if err != nil {
 			return errorResponse("copier: ensure: error resolving %q/%q: %v", req.Directory, item.Path, err)
 		}
@@ -2565,7 +2579,7 @@ func copierHandlerConditionalRemove(req request, idMappings *idtools.IDMappings)
 			uid, gid = hostDirPair.UID, hostDirPair.GID
 		}
 
-		itemPath, err := resolvePath(req.Root, filepath.Join(req.Directory, item.Path), false, nil) // Warning: this can refer to an existing (and escaping) symlink
+		itemPath, err := resolvePath(req.Root, filepath.Join(req.Directory, item.Path), false) // Warning: this can refer to an existing (and escaping) symlink
 		if err != nil {
 			return errorResponse("copier: conditionalRemove: error resolving %q/%q/%q: %v", req.Root, req.Directory, item.Path, err)
 		}
@@ -2581,7 +2595,7 @@ func copierHandlerConditionalRemove(req request, idMappings *idtools.IDMappings)
 			removed = append(removed, item.Path)
 			continue
 		}
-		parentPath, err := resolvePath(req.Root, filepath.Dir(filepath.Join(req.Directory, item.Path)), true, nil)
+		parentPath, err := resolvePath(req.Root, filepath.Dir(filepath.Join(req.Directory, item.Path)), true)
 		if err != nil {
 			return errorResponse("copier: conditionalRemove: error resolving parent of %q/%q/%q: %v", req.Root, req.Directory, item.Path, err)
 		}
