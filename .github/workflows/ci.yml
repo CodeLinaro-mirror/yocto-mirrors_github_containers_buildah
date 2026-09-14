@@ -179,10 +179,6 @@ jobs:
           # Skip these cells until that's fixed upstream.
           - storage: overlay
             priv: rootless
-        include:
-          - storage: overlay
-            priv: root
-            distro: fedora-rawhide
     uses: ./.github/workflows/lima.yml
     with:
       runner: cncf-ubuntu-8-32-x86
