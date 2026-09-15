@@ -1,3 +1,27 @@
+- Changelog for v1.43.4 (2026-09-15)
+  * Bump go.podman.io/storage, go.podman.io/image/v5, and go.podman.io/common
+  * Add FIXMEs for the read path
+  * Split insecureResolvePath from resolvePath
+  * Fix root escapes in copier.Put
+  * Fix escaping symlinks in Ensure
+  * Fix symlink escapes in ConditionalRemove
+  * Remove unnecessary filepath.FromSlash
+  * Use a separate hdrErr variable for the loop condition
+  * Improve test coverage
+  * Decrease size of the test archives
+  * Remove rawhide from test matrix
+  * integration tests: set $CONTAINERS_POLICY_JSON
+  * test/conformance: update heredoc dockerfile frontend
+  * ci: install networking packages for integration tests
+  * copier.copierHandlerPut(): run each path to extract through os.Root.Lstat()
+  * linter(staticcheck): don't set deprecated fields when setting up overlay
+  * Fix a few format-specifier warnings
+  * linter(gofumpt): update formatting to pass gofumpt
+  * Update dependency golangci/golangci-lint to v2.13.2
+  * chroot.mountFlagMap: change keys from int to uintptr
+  * vendor: bump golang.org/x/crypto to v0.56.0
+  * ci: use latest AUTOMATION_RELEASE from main
+
 - Changelog for v1.43.3 (2026-08-04)
   * Bump golang.org/x/crypto to v0.53.0
   * conformance test cases: add a fsSkipCompatVolumesTrue field
