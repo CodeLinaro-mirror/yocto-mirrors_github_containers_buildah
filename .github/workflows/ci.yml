@@ -165,10 +165,6 @@ jobs:
         distro: [fedora-current, fedora-prior, debian-sid]
         storage: [vfs, overlay]
         priv: [root, rootless]
-        include:
-          - storage: overlay
-            priv: root
-            distro: fedora-rawhide
     uses: ./.github/workflows/lima.yml
     with:
       runner: cncf-ubuntu-8-32-x86

@@ -3394,6 +3394,8 @@ var internalTestCases = []testCase{
 		contextDir:          "add/parent-symlink",
 		fsSkip:              []string{"(dir):testsubdir:mtime", "(dir):testsubdir:(dir):etc:mtime"},
 		compatScratchConfig: types.OptionalBoolTrue,
+		shouldFailAt:        2,
+		failureRegex:        "symldir1/etc: path escapes from parent",
 	},
 
 	{
