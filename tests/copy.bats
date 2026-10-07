@@ -283,7 +283,8 @@ load helpers
           die "Timed out waiting for ${TEST_SCRATCH_DIR}/test.socket (is nc installed?)"
       fi
   done
-  kill $nc_pid
+  # We want SIGKILL here as nmap-ncat 7.991 is misbehaving on SIGTERM and takes down the full process group.
+  kill -KILL $nc_pid
 
   run_buildah from $WITH_POLICY_JSON scratch
   cid=$output
